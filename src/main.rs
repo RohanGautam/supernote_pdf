@@ -1,4 +1,5 @@
 use anyhow::{Ok, Result};
+use image::{Rgba, RgbaImage, imageops};
 use itertools::Itertools;
 use regex::Regex;
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ pub struct Page {
 
 #[derive(Debug, Default)]
 pub struct Layer {
+    pub key: String,
     pub protocol: String,
     pub bitmap_address: u64,
 }
@@ -116,6 +118,7 @@ fn parse_notebook(file_path: &str) -> Result<Notebook> {
                 let layer_addr = page_map.get(layer_key).unwrap().parse::<u64>()?;
                 let data = parse_metadata_block(&mut file, layer_addr)?;
                 layers.push(Layer {
+                    key: layer_key.to_string(),
                     protocol: data.get("LAYERPROTOCOL").cloned().unwrap_or_default(),
                     bitmap_address: data
                         .get("LAYERBITMAP")
@@ -136,6 +139,102 @@ fn parse_notebook(file_path: &str) -> Result<Notebook> {
     })
 }
 
+// Add these constants near the top of your file
+const A5X_WIDTH: usize = 1404;
+const A5X_HEIGHT: usize = 1872;
+
+// ... Your existing structs and parsing functions ...
+
+/// Decodes a byte stream compressed with the RATTA_RLE algorithm.
+fn decode_rle(compressed_data: &[u8]) -> Result<Vec<u8>> {
+    // A5X screen dimensions
+    let expected_len = A5X_WIDTH * A5X_HEIGHT;
+    let mut decompressed = Vec::with_capacity(expected_len);
+
+    let mut i = 0; // Our position in the compressed_data slice
+    let mut holder: Option<(u8, u8)> = None; // State for multi-byte lengths
+
+    while i < compressed_data.len() {
+        // Ensure we can read a pair of bytes
+        if i + 1 >= compressed_data.len() {
+            break;
+        }
+        let color_code = compressed_data[i];
+        let mut length_code = compressed_data[i + 1];
+        i += 2; // Move to the next pair
+
+        let mut length: usize;
+
+        if let Some((prev_color_code, prev_length_code)) = holder.take() {
+            // We are in the "holder" state from the previous iteration.
+            if color_code == prev_color_code {
+                // The colors match, so combine the lengths.
+                length = 1 + length_code as usize + (((prev_length_code & 0x7f) as usize + 1) << 7);
+            } else {
+                // Colors don't match. First, process the held-over length.
+                let held_length = ((prev_length_code & 0x7f) as usize + 1) << 7;
+                decompressed.extend(std::iter::repeat(prev_color_code).take(held_length));
+                // Then, process the current pair normally.
+                length = length_code as usize + 1;
+            }
+        } else if length_code == 0xff {
+            // Special marker for a long run
+            length = 0x4000; // 16384
+        } else if length_code & 0x80 != 0 {
+            // Most significant bit is set. This is a multi-byte length marker.
+            // We store the current pair in the `holder` and continue to the next iteration.
+            holder = Some((color_code, length_code));
+            continue;
+        } else {
+            // Standard case: length is just length_code + 1.
+            length = length_code as usize + 1;
+        }
+
+        // Add the `color_code` to our output `length` times.
+        decompressed.extend(std::iter::repeat(color_code).take(length));
+    }
+
+    // After the loop, check if there's a final item in the holder.
+    // This can happen if the last block was a multi-byte marker.
+    if let Some((color_code, length_code)) = holder {
+        let remaining_len = expected_len.saturating_sub(decompressed.len());
+        // A simple heuristic for the tail length
+        let tail_length = std::cmp::min(((length_code & 0x7f) as usize + 1) << 7, remaining_len);
+        if tail_length > 0 {
+            decompressed.extend(std::iter::repeat(color_code).take(tail_length));
+        }
+    }
+
+    // Final sanity check
+    if decompressed.len() != expected_len {
+        // In a real app, you might want a more robust way to handle this,
+        // but for now, we can pad or truncate to the expected size.
+        decompressed.resize(expected_len, 0x62); // Pad with transparent if too short
+    }
+
+    Ok(decompressed)
+}
+
+/// Maps a Supernote grayscale color code to an RGBA pixel.
+fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
+    match pixel_byte {
+        0x61 => Rgba([0, 0, 0, 255]),          // Black
+        0x63 => Rgba([0x9d, 0x9d, 0x9d, 255]), // Dark Gray
+        0x9d => Rgba([0x9d, 0x9d, 0x9d, 255]), // Dark Gray
+        0x9e => Rgba([0x9d, 0x9d, 0x9d, 255]), // Dark Gray
+        0x64 => Rgba([0xc9, 0xc9, 0xc9, 255]), // Gray
+        0xc9 => Rgba([0xc9, 0xc9, 0xc9, 255]), // Gray
+        0xca => Rgba([0xc9, 0xc9, 0xc9, 255]), // Gray
+        0x65 => Rgba([255, 255, 255, 255]),    // White
+        // 0x62 => Rgba([255, 255, 255, 255]),    // White
+        0x62 => Rgba([0, 0, 0, 0]), // Transparent (Alpha = 0)
+        _ => {
+            // println!("Unknown pixel_byte: {:#04x}", pixel_byte);
+            Rgba([0, 0, 0, 255]) // black
+        } // _ => Rgba([0, 0, 0, 0]), // Default: Magenta for unknown codes
+    }
+}
+
 // make main return result so you can work with functions returning result
 // and just use ? to access the ok value
 fn main() -> Result<()> {
@@ -146,7 +245,100 @@ fn main() -> Result<()> {
     println!("File Signature: {}", signature);
 
     let notebook = parse_notebook(file_path)?;
-    println!("{:?}", notebook);
+    // println!("{:?}", notebook);
+    // Let's try to decode the first RLE layer we find.
+
+    // Let's process the very first page of the notebook.
+    if let Some(first_page) = notebook.pages.get(0) {
+        println!("\n--- Compositing Page 0 ---");
+
+        // 1. Create the base canvas for the page.
+        // This will be our final image. We start with a fully transparent background.
+        let mut base_canvas = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
+
+        // 2. Iterate through each layer of the page to decode and overlay it.
+        for (l, layer) in first_page.layers.iter().enumerate() {
+            if layer.bitmap_address == 0 {
+                continue; // Skip empty/unused layers
+            }
+
+            println!(
+                "Processing Layer {}: Protocol='{}', Address={}",
+                l, layer.protocol, layer.bitmap_address
+            );
+
+            // Open the file to read this layer's data.
+            let mut file = File::open(file_path)?;
+
+            // --- DECODE THE LAYER ---
+            let pixel_data = match layer.protocol.as_str() {
+                "RATTA_RLE" => {
+                    // Read the compressed RLE data block
+                    file.seek(SeekFrom::Start(layer.bitmap_address))?;
+                    let mut len_bytes = [0u8; 4];
+                    file.read_exact(&mut len_bytes)?;
+                    let block_len = u32::from_le_bytes(len_bytes) as usize;
+                    let mut compressed_data = vec![0; block_len];
+                    file.read_exact(&mut compressed_data)?;
+                    decode_rle(&compressed_data)?
+                }
+                "PNG" => {
+                    file.seek(SeekFrom::Start(layer.bitmap_address))?;
+                    let mut len_bytes = [0u8; 4];
+                    file.read_exact(&mut len_bytes)?;
+                    let block_len = u32::from_le_bytes(len_bytes) as usize;
+
+                    // 1. Read the entire PNG block into an in-memory buffer (a Vec<u8>).
+                    let mut png_bytes = vec![0; block_len];
+                    file.read_exact(&mut png_bytes)?;
+
+                    // 2. Load the image from the in-memory buffer.
+                    // A slice `&[u8]` can be treated as a reader.
+                    let png_image = image::load_from_memory(&png_bytes)?.to_rgba8();
+
+                    let mut white_background = RgbaImage::from_pixel(
+                        A5X_WIDTH as u32,
+                        A5X_HEIGHT as u32,
+                        Rgba([255, 255, 255, 255]), // Solid White
+                    );
+
+                    // 3. Overlay the loaded PNG onto the white background.
+                    // This "flattens" the PNG, replacing its transparent parts with white.
+                    imageops::overlay(&mut white_background, &png_image, 0, 0);
+
+                    // 4. Finally, overlay the newly whitened background onto our main canvas.
+                    imageops::overlay(&mut base_canvas, &white_background, 0, 0);
+                    continue;
+                }
+                // We can add more protocols like ZLIB here later
+                _ => {
+                    println!("  -> Skipping unsupported protocol '{}'", layer.protocol);
+                    continue;
+                }
+            };
+
+            // --- CREATE AN IMAGE FOR THE CURRENT LAYER ---
+            let mut layer_image = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
+            for (i, &pixel_byte) in pixel_data.iter().enumerate() {
+                let x = (i % A5X_WIDTH) as u32;
+                let y = (i / A5X_WIDTH) as u32;
+                layer_image.put_pixel(x, y, to_rgba(pixel_byte));
+            }
+
+            // --- OVERLAY THE LAYER ONTO THE BASE CANVAS ---
+            // `imageops::overlay` correctly handles the alpha channel, so transparent
+            // pixels in `layer_image` won't overwrite what's on the `base_canvas`.
+            imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
+            println!("  -> Overlayed layer {} onto the canvas.", l);
+        }
+
+        // 3. Save the final composited image.
+        let output_filename = "output_page_0_composite.png";
+        base_canvas.save(output_filename)?;
+        println!("\n✅ Page 0 composite image saved as '{}'", output_filename);
+    } else {
+        println!("\nNotebook has no pages to process.");
+    }
 
     Ok(())
 }
