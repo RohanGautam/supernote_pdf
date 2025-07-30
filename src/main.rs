@@ -25,6 +25,8 @@ fn get_signature(file_path: &str) -> Result<String> {
     Ok(signature_string)
 }
 
+// make main return result so you can work with functions returning result
+// and just use ? to access the ok value
 fn main() -> Result<()> {
     let file_path = "./data/sample.note";
     println!("Attempting to read signature from: {}", file_path);
