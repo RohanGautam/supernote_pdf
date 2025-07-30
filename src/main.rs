@@ -1,6 +1,26 @@
-use anyhow::Result;
+use anyhow::{Ok, Result};
+use itertools::Itertools;
+use regex::Regex;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+
+#[derive(Debug)]
+pub struct Notebook {
+    pub signature: String,
+    pub pages: Vec<Page>,
+}
+
+#[derive(Debug)]
+pub struct Page {
+    pub layers: Vec<Layer>,
+}
+
+#[derive(Debug, Default)]
+pub struct Layer {
+    pub protocol: String,
+    pub bitmap_address: u64,
+}
 
 fn get_signature(file_path: &str) -> Result<String> {
     const SIGNATURE_OFFSET: u64 = 4;
@@ -25,6 +45,64 @@ fn get_signature(file_path: &str) -> Result<String> {
     Ok(signature_string)
 }
 
+/// Reads a metadata block at a given address and parses it into a HashMap.
+/// Metadata format is `<KEY1:VALUE1><KEY2:VALUE2>...`
+fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String, String>> {
+    // The regex for parsing the key-value format.
+    // It's "lazy" (`*?`) to handle nested or unusual values correctly.
+    let re = Regex::new(r"<(?P<key>[^:]+?):(?P<value>.*?)>")?;
+
+    file.seek(SeekFrom::Start(address))?;
+
+    // Read the 4-byte block length
+    let mut len_bytes = [0u8; 4];
+    file.read_exact(&mut len_bytes)?;
+    let block_len = u32::from_le_bytes(len_bytes) as usize;
+
+    // Read the block content
+    let mut content_bytes = vec![0; block_len];
+    file.read_exact(&mut content_bytes)?;
+    let content = String::from_utf8(content_bytes)?;
+
+    // Use the regex to find all key-value pairs and collect them into a map.
+    let map: HashMap<String, String> = re
+        .captures_iter(&content)
+        .map(|cap| {
+            let key = cap.name("key").unwrap().as_str().to_string();
+            let value = cap.name("value").unwrap().as_str().to_string();
+            (key, value)
+        })
+        .collect();
+
+    Ok(map)
+}
+
+fn parse_notebook(file_path: &str) -> Result<()> {
+    let tmp_signature = "test".to_string();
+    let mut file = File::open(file_path)?;
+
+    // Get footer address and map
+    file.seek(SeekFrom::End(-4))?;
+    let mut addr_bytes = [0u8; 4];
+    file.read_exact(&mut addr_bytes)?;
+    let footer_addr = u32::from_le_bytes(addr_bytes) as u64; // Convert the little-endian bytes to a u32, then cast to u64
+    let footer_map = parse_metadata_block(&mut file, footer_addr)?;
+    // println!("{:?}", footer_map);
+
+    // get page addresses from the hashmap, sorted
+    let page_addrs = footer_map
+        .iter()
+        .filter(|(k, _v)| k.starts_with("PAGE"))
+        .sorted_by_key(|(k, _v)| *k)
+        .map(|(_k, v)| v.parse::<u64>())
+        .collect::<std::result::Result<Vec<u64>, _>>()?;
+
+    let page_map = parse_metadata_block(&mut file, *page_addrs.get(0).unwrap());
+    println!("{:?}", page_map);
+
+    Ok(())
+}
+
 // make main return result so you can work with functions returning result
 // and just use ? to access the ok value
 fn main() -> Result<()> {
@@ -33,6 +111,8 @@ fn main() -> Result<()> {
 
     let signature = get_signature(file_path)?;
     println!("File Signature: {}", signature);
+
+    parse_notebook(file_path);
 
     Ok(())
 }
