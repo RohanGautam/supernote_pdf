@@ -255,8 +255,13 @@ fn main() -> Result<()> {
 
         // 1. Create the base canvas for the page.
         // This will be our final image. We start with a fully transparent background.
-        let mut base_canvas = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
+        // let mut base_canvas = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
 
+        let mut base_canvas = RgbaImage::from_pixel(
+            A5X_WIDTH as u32,
+            A5X_HEIGHT as u32,
+            Rgba([255, 255, 255, 255]), // Solid White
+        );
         // 2. Iterate through each layer of the page to decode and overlay it.
         for (l, layer) in first_page.layers.iter().enumerate() {
             if layer.bitmap_address == 0 {
@@ -284,31 +289,17 @@ fn main() -> Result<()> {
                     decode_rle(&compressed_data)?
                 }
                 "PNG" => {
+                    // this match arm mutates base canvas directly
                     file.seek(SeekFrom::Start(layer.bitmap_address))?;
                     let mut len_bytes = [0u8; 4];
                     file.read_exact(&mut len_bytes)?;
                     let block_len = u32::from_le_bytes(len_bytes) as usize;
 
-                    // 1. Read the entire PNG block into an in-memory buffer (a Vec<u8>).
                     let mut png_bytes = vec![0; block_len];
                     file.read_exact(&mut png_bytes)?;
-
-                    // 2. Load the image from the in-memory buffer.
-                    // A slice `&[u8]` can be treated as a reader.
                     let png_image = image::load_from_memory(&png_bytes)?.to_rgba8();
 
-                    let mut white_background = RgbaImage::from_pixel(
-                        A5X_WIDTH as u32,
-                        A5X_HEIGHT as u32,
-                        Rgba([255, 255, 255, 255]), // Solid White
-                    );
-
-                    // // 3. Overlay the loaded PNG onto the white background.
-                    // // This "flattens" the PNG, replacing its transparent parts with white.
-                    imageops::overlay(&mut white_background, &png_image, 0, 0);
-
-                    // 4. Finally, overlay the newly whitened background onto our main canvas.
-                    imageops::overlay(&mut base_canvas, &white_background, 0, 0);
+                    imageops::overlay(&mut base_canvas, &png_image, 0, 0);
                     continue;
                 }
                 // We can add more protocols like ZLIB here later
@@ -318,7 +309,6 @@ fn main() -> Result<()> {
                 }
             };
 
-            // --- CREATE AN IMAGE FOR THE CURRENT LAYER ---
             let mut layer_image = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
             for (i, &pixel_byte) in pixel_data.iter().enumerate() {
                 let x = (i % A5X_WIDTH) as u32;
@@ -326,9 +316,6 @@ fn main() -> Result<()> {
                 layer_image.put_pixel(x, y, to_rgba(pixel_byte));
             }
 
-            // --- OVERLAY THE LAYER ONTO THE BASE CANVAS ---
-            // `imageops::overlay` correctly handles the alpha channel, so transparent
-            // pixels in `layer_image` won't overwrite what's on the `base_canvas`.
             imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
             println!("  -> Overlayed layer {} onto the canvas.", l);
         }
@@ -337,27 +324,6 @@ fn main() -> Result<()> {
         let output_filename = "output_page_0_composite.png";
         base_canvas.save(output_filename)?;
         println!("\n✅ Page 0 composite image saved as '{}'", output_filename);
-
-        // let config = vtracer::Config::default();
-        // let width = base_canvas.width() as usize;
-        // let height = base_canvas.height() as usize;
-        // let pixels = base_canvas.into_raw();
-
-        // let svg = convert(
-        //     ColorImage {
-        //         pixels: pixels,
-        //         width: width,
-        //         height: height,
-        //     },
-        //     config,
-        // )
-        // .unwrap();
-
-        // let mut out_file = File::create("output.svg")?;
-        // write!(&mut out_file, "{}", svg).expect("failed to write file.");
-
-        // config.path_simplification = 2.0;
-        // convert_image_to_svg(input_path, output_path, config)
     } else {
         println!("\nNotebook has no pages to process.");
     }
