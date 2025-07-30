@@ -14,6 +14,7 @@ pub struct Notebook {
 
 #[derive(Debug)]
 pub struct Page {
+    pub addr: u64,
     pub layers: Vec<Layer>,
 }
 
@@ -83,7 +84,7 @@ fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String,
 }
 
 fn parse_notebook(file_path: &str) -> Result<Notebook> {
-    let tmp_signature = "test".to_string();
+    let file_signature = get_signature(file_path)?;
     let mut file = File::open(file_path)?;
 
     // Get footer address and map
@@ -109,8 +110,6 @@ fn parse_notebook(file_path: &str) -> Result<Notebook> {
     for addr in page_addrs {
         let page_map = parse_metadata_block(&mut file, addr)?;
         let layer_keys = ["BGLAYER", "MAINLAYER", "LAYER1", "LAYER2", "LAYER3"];
-        // this looks cool but for loop might be better to avoid double collect
-
         let mut layers: Vec<Layer> = Vec::new();
         for layer_key in layer_keys {
             if page_map.contains_key(layer_key) {
@@ -125,11 +124,14 @@ fn parse_notebook(file_path: &str) -> Result<Notebook> {
                 });
             }
         }
-        pages.push(Page { layers: layers });
+        pages.push(Page {
+            addr: addr,
+            layers: layers,
+        });
     }
 
     Ok(Notebook {
-        signature: tmp_signature,
+        signature: file_signature,
         pages: pages,
     })
 }
