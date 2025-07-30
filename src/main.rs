@@ -3,6 +3,7 @@ use itertools::Itertools;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
+use std::hash::Hash;
 use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug)]
@@ -50,6 +51,10 @@ fn get_signature(file_path: &str) -> Result<String> {
 fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String, String>> {
     // The regex for parsing the key-value format.
     // It's "lazy" (`*?`) to handle nested or unusual values correctly.
+    if address == 0 {
+        let empty: HashMap<String, String> = HashMap::new();
+        return Ok(empty);
+    }
     let re = Regex::new(r"<(?P<key>[^:]+?):(?P<value>.*?)>")?;
 
     file.seek(SeekFrom::Start(address))?;
@@ -77,7 +82,7 @@ fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String,
     Ok(map)
 }
 
-fn parse_notebook(file_path: &str) -> Result<()> {
+fn parse_notebook(file_path: &str) -> Result<Notebook> {
     let tmp_signature = "test".to_string();
     let mut file = File::open(file_path)?;
 
@@ -97,10 +102,36 @@ fn parse_notebook(file_path: &str) -> Result<()> {
         .map(|(_k, v)| v.parse::<u64>())
         .collect::<std::result::Result<Vec<u64>, _>>()?;
 
-    let page_map = parse_metadata_block(&mut file, *page_addrs.get(0).unwrap());
-    println!("{:?}", page_map);
+    // let page_map = parse_metadata_block(&mut file, *page_addrs.get(0).unwrap());
+    // println!("{:?}", page_map);
 
-    Ok(())
+    let mut pages: Vec<Page> = Vec::new();
+    for addr in page_addrs {
+        let page_map = parse_metadata_block(&mut file, addr)?;
+        let layer_keys = ["BGLAYER", "MAINLAYER", "LAYER1", "LAYER2", "LAYER3"];
+        // this looks cool but for loop might be better to avoid double collect
+
+        let mut layers: Vec<Layer> = Vec::new();
+        for layer_key in layer_keys {
+            if page_map.contains_key(layer_key) {
+                let layer_addr = page_map.get(layer_key).unwrap().parse::<u64>()?;
+                let data = parse_metadata_block(&mut file, layer_addr)?;
+                layers.push(Layer {
+                    protocol: data.get("LAYERPROTOCOL").cloned().unwrap_or_default(),
+                    bitmap_address: data
+                        .get("LAYERBITMAP")
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
+                });
+            }
+        }
+        pages.push(Page { layers: layers });
+    }
+
+    Ok(Notebook {
+        signature: tmp_signature,
+        pages: pages,
+    })
 }
 
 // make main return result so you can work with functions returning result
@@ -112,7 +143,8 @@ fn main() -> Result<()> {
     let signature = get_signature(file_path)?;
     println!("File Signature: {}", signature);
 
-    parse_notebook(file_path);
+    let notebook = parse_notebook(file_path)?;
+    println!("{:?}", notebook);
 
     Ok(())
 }
