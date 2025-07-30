@@ -5,7 +5,8 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
 use std::hash::Hash;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
+use vtracer::{ColorImage, convert};
 
 #[derive(Debug)]
 pub struct Notebook {
@@ -230,7 +231,8 @@ fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
         0x62 => Rgba([0, 0, 0, 0]), // Transparent (Alpha = 0)
         _ => {
             // println!("Unknown pixel_byte: {:#04x}", pixel_byte);
-            Rgba([0, 0, 0, 255]) // black
+            // Rgba([0, 0, 0, 255]) // black
+            Rgba([0, 0, 0, 0]) // black
         } // _ => Rgba([0, 0, 0, 0]), // Default: Magenta for unknown codes
     }
 }
@@ -296,18 +298,18 @@ fn main() -> Result<()> {
                     // A slice `&[u8]` can be treated as a reader.
                     let png_image = image::load_from_memory(&png_bytes)?.to_rgba8();
 
-                    let mut white_background = RgbaImage::from_pixel(
-                        A5X_WIDTH as u32,
-                        A5X_HEIGHT as u32,
-                        Rgba([255, 255, 255, 255]), // Solid White
-                    );
+                    // let mut white_background = RgbaImage::from_pixel(
+                    //     A5X_WIDTH as u32,
+                    //     A5X_HEIGHT as u32,
+                    //     Rgba([255, 255, 255, 255]), // Solid White
+                    // );
 
-                    // 3. Overlay the loaded PNG onto the white background.
-                    // This "flattens" the PNG, replacing its transparent parts with white.
-                    imageops::overlay(&mut white_background, &png_image, 0, 0);
+                    // // 3. Overlay the loaded PNG onto the white background.
+                    // // This "flattens" the PNG, replacing its transparent parts with white.
+                    // imageops::overlay(&mut white_background, &png_image, 0, 0);
 
                     // 4. Finally, overlay the newly whitened background onto our main canvas.
-                    imageops::overlay(&mut base_canvas, &white_background, 0, 0);
+                    imageops::overlay(&mut base_canvas, &png_image, 0, 0);
                     continue;
                 }
                 // We can add more protocols like ZLIB here later
@@ -336,6 +338,27 @@ fn main() -> Result<()> {
         let output_filename = "output_page_0_composite.png";
         base_canvas.save(output_filename)?;
         println!("\n✅ Page 0 composite image saved as '{}'", output_filename);
+
+        let mut config = vtracer::Config::default();
+        let width = base_canvas.width() as usize;
+        let height = base_canvas.height() as usize;
+        let pixels = base_canvas.into_raw();
+
+        let svg = convert(
+            ColorImage {
+                pixels: pixels,
+                width: width,
+                height: height,
+            },
+            config,
+        )
+        .unwrap();
+
+        let mut out_file = File::create("output.svg")?;
+        write!(&mut out_file, "{}", svg).expect("failed to write file.");
+
+        // config.path_simplification = 2.0;
+        // convert_image_to_svg(input_path, output_path, config)
     } else {
         println!("\nNotebook has no pages to process.");
     }
