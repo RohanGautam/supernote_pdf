@@ -106,7 +106,8 @@ fn parse_notebook(file: &mut File) -> Result<Notebook> {
     let page_addrs = footer_map
         .iter()
         .filter(|(k, _v)| k.starts_with("PAGE"))
-        .sorted_by_key(|(k, _v)| *k)
+        // .map(|(k, v)| (k.strip_prefix("PAGE").unwrap().parse::<u64>().unwrap(), v))
+        .sorted_by_key(|(k, _v)| k.strip_prefix("PAGE").unwrap().parse::<u64>().unwrap())
         .map(|(_k, v)| v.parse::<u64>())
         .collect::<std::result::Result<Vec<u64>, _>>()?;
 
@@ -243,10 +244,9 @@ fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
 fn main() -> Result<()> {
     let file_path = "./data/sample.note";
     let mut file = File::open(file_path)?;
-    println!("Attempting to read signature from: {}", file_path);
 
-    let signature = get_signature(&mut file)?;
-    println!("File Signature: {}", signature);
+    // let signature = get_signature(&mut file)?;
+    // println!("File Signature: {}", signature);
 
     let notebook = parse_notebook(&mut file)?;
     // println!("{:?}", notebook);
