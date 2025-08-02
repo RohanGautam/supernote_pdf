@@ -1,14 +1,18 @@
 use anyhow::{Ok, Result};
-use image::{Rgba, RgbaImage, imageops};
+use image::{EncodableLayout, ImageFormat, Rgba, RgbaImage, imageops};
 use itertools::Itertools;
+use printpdf::{Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Pt, RawImage, XObjectTransform};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use vtracer::{ColorImage, convert};
 
 const A5X_WIDTH: usize = 1404;
 const A5X_HEIGHT: usize = 1872;
+const PDF_WIDTH: f32 = 147.0;
+const PDF_HEIGHT: f32 = 209.0;
+const PDF_DPI: f32 = 300.0;
 
 #[derive(Debug)]
 pub struct Notebook {
@@ -246,76 +250,94 @@ fn main() -> Result<()> {
 
     let notebook = parse_notebook(&mut file)?;
     // println!("{:?}", notebook);
-    // Let's try to decode the first RLE layer we find.
 
-    // Let's process the very first page of the notebook.
-    if let Some(first_page) = notebook.pages.get(0) {
-        println!("\n--- Compositing Page 0 ---");
-
+    // .iter() des not create a copy
+    // https://stackoverflow.com/questions/73601250/why-use-iter-in-a-for-loop-rust
+    let mut page_images = Vec::new();
+    for page in notebook.pages.iter() {
         let mut base_canvas = RgbaImage::from_pixel(
             A5X_WIDTH as u32,
             A5X_HEIGHT as u32,
-            Rgba([255, 255, 255, 255]), // Solid White
+            Rgba([255, 255, 255, 255]), // Solid White bg by default
         );
-        // iterate through layers in page
-        for (l, layer) in first_page.layers.iter().enumerate() {
+        for layer in page.layers.iter() {
             if layer.bitmap_address == 0 {
                 continue; // Skip empty/unused layers
+            } else if layer.protocol.as_str() == "RATTA_RLE" {
+                // Read the compressed RLE data block
+                file.seek(SeekFrom::Start(layer.bitmap_address))?;
+                let mut len_bytes = [0u8; 4];
+                file.read_exact(&mut len_bytes)?;
+                let block_len = u32::from_le_bytes(len_bytes) as usize;
+                let mut compressed_data = vec![0; block_len];
+                file.read_exact(&mut compressed_data)?;
+                let pixel_data = decode_rle(&compressed_data)?;
+                // create new image for this layer and overlay
+                let mut layer_image = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
+                for (i, &pixel_byte) in pixel_data.iter().enumerate() {
+                    let x = (i % A5X_WIDTH) as u32;
+                    let y = (i / A5X_WIDTH) as u32;
+                    layer_image.put_pixel(x, y, to_rgba(pixel_byte));
+                }
+                imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
+            } else if layer.protocol.as_str() == "PNG" {
+                file.seek(SeekFrom::Start(layer.bitmap_address))?;
+                let mut len_bytes = [0u8; 4];
+                file.read_exact(&mut len_bytes)?;
+                let block_len = u32::from_le_bytes(len_bytes) as usize;
+
+                let mut png_bytes = vec![0; block_len];
+                file.read_exact(&mut png_bytes)?;
+                let png_image = image::load_from_memory(&png_bytes)?.to_rgba8();
+                imageops::overlay(&mut base_canvas, &png_image, 0, 0);
             }
-
-            // println!(
-            //     "Processing Layer {}: Protocol='{}', Address={}",
-            //     l, layer.protocol, layer.bitmap_address
-            // );
-
-            let pixel_data = match layer.protocol.as_str() {
-                "RATTA_RLE" => {
-                    // Read the compressed RLE data block
-                    file.seek(SeekFrom::Start(layer.bitmap_address))?;
-                    let mut len_bytes = [0u8; 4];
-                    file.read_exact(&mut len_bytes)?;
-                    let block_len = u32::from_le_bytes(len_bytes) as usize;
-                    let mut compressed_data = vec![0; block_len];
-                    file.read_exact(&mut compressed_data)?;
-                    // this is returned to the match arm
-                    decode_rle(&compressed_data)?
-                }
-                "PNG" => {
-                    // this match arm mutates base canvas directly
-                    file.seek(SeekFrom::Start(layer.bitmap_address))?;
-                    let mut len_bytes = [0u8; 4];
-                    file.read_exact(&mut len_bytes)?;
-                    let block_len = u32::from_le_bytes(len_bytes) as usize;
-
-                    let mut png_bytes = vec![0; block_len];
-                    file.read_exact(&mut png_bytes)?;
-                    let png_image = image::load_from_memory(&png_bytes)?.to_rgba8();
-
-                    imageops::overlay(&mut base_canvas, &png_image, 0, 0);
-                    continue;
-                }
-                _ => {
-                    println!("  -> Skipping unsupported protocol '{}'", layer.protocol);
-                    continue;
-                }
-            };
-
-            let mut layer_image = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
-            for (i, &pixel_byte) in pixel_data.iter().enumerate() {
-                let x = (i % A5X_WIDTH) as u32;
-                let y = (i / A5X_WIDTH) as u32;
-                layer_image.put_pixel(x, y, to_rgba(pixel_byte));
-            }
-
-            imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
         }
-
-        let output_filename = "output_page_0_composite.png";
-        base_canvas.save(output_filename)?;
-        println!("\n✅ Page 0 composite image saved as '{}'", output_filename);
-    } else {
-        println!("\nNotebook has no pages to process.");
+        let mut buffer = Cursor::new(Vec::new());
+        // let pmg = ImageFormat::Png
+        base_canvas.write_to(&mut buffer, ImageFormat::Png)?;
+        page_images.push(buffer.into_inner());
+        break;
     }
+
+    println!("{} pages", page_images.len());
+
+    // write to a pdf
+    let mut doc = PdfDocument::new("Supernote Backup");
+    let mut pages_pdf = Vec::new();
+
+    let img_width_mm = ((A5X_WIDTH as f32) / PDF_DPI) * 25.4;
+    let img_height_mm = ((A5X_HEIGHT as f32) / PDF_DPI) * 25.4;
+    let scale_x = PDF_WIDTH / img_width_mm;
+    let scale_y = PDF_HEIGHT / img_height_mm;
+
+    for img in page_images.iter() {
+        // let bytes = img.as_bytes();
+        let raw = RawImage::decode_from_bytes(img, &mut Vec::new()).unwrap();
+        let mut ops = Vec::new();
+        // Add the image to the document resources and get its ID
+        let image_id = doc.add_image(&raw);
+
+        // Place the image with default transform (at 0,0)
+        // ops.push(Op::UseXobject {
+        //     id: image_id.clone(),
+        //     transform: XObjectTransform::default(),
+        // });
+
+        ops.push(Op::UseXobject {
+            id: image_id.clone(),
+            transform: XObjectTransform {
+                scale_x: Some(1.0 / scale_x),
+                scale_y: Some(1.0 / scale_y),
+                ..Default::default()
+            },
+        });
+        let page = PdfPage::new(Mm(PDF_WIDTH), Mm(PDF_HEIGHT), ops);
+        pages_pdf.push(page);
+    }
+    let bytes = doc
+        .with_pages(pages_pdf)
+        .save(&PdfSaveOptions::default(), &mut Vec::new()); // doc.add_image(page_images.get(0)?);
+    std::fs::write("./output.pdf", bytes).unwrap();
 
     Ok(())
 }
