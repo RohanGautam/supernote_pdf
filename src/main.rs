@@ -7,6 +7,9 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use vtracer::{ColorImage, convert};
 
+const A5X_WIDTH: usize = 1404;
+const A5X_HEIGHT: usize = 1872;
+
 #[derive(Debug)]
 pub struct Notebook {
     pub signature: String,
@@ -26,14 +29,13 @@ pub struct Layer {
     pub bitmap_address: u64,
 }
 
-fn get_signature(file_path: &str) -> Result<String> {
+fn get_signature(file: &mut File) -> Result<String> {
     const SIGNATURE_OFFSET: u64 = 4;
     const SIGNATURE_LENGTH: usize = 20;
 
     // The `?` operator is used here. If `File::open` returns an `Err`, the `?`
     // will immediately stop this function and return that `Err` to the caller.
     // If it returns `Ok(file)`, it unwraps the value and assigns it to `file`.
-    let mut file = File::open(file_path)?;
 
     // Seek to the signature's starting position.
     file.seek(SeekFrom::Start(SIGNATURE_OFFSET))?;
@@ -85,16 +87,15 @@ fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String,
     Ok(map)
 }
 
-fn parse_notebook(file_path: &str) -> Result<Notebook> {
-    let file_signature = get_signature(file_path)?;
-    let mut file = File::open(file_path)?;
+fn parse_notebook(file: &mut File) -> Result<Notebook> {
+    let file_signature = get_signature(file)?;
 
     // Get footer address and map
     file.seek(SeekFrom::End(-4))?;
     let mut addr_bytes = [0u8; 4];
     file.read_exact(&mut addr_bytes)?;
     let footer_addr = u32::from_le_bytes(addr_bytes) as u64; // Convert the little-endian bytes to a u32, then cast to u64
-    let footer_map = parse_metadata_block(&mut file, footer_addr)?;
+    let footer_map = parse_metadata_block(file, footer_addr)?;
     // println!("{:?}", footer_map);
 
     // get page addresses from the hashmap, sorted
@@ -110,13 +111,13 @@ fn parse_notebook(file_path: &str) -> Result<Notebook> {
 
     let mut pages: Vec<Page> = Vec::new();
     for addr in page_addrs {
-        let page_map = parse_metadata_block(&mut file, addr)?;
+        let page_map = parse_metadata_block(file, addr)?;
         let layer_keys = ["BGLAYER", "MAINLAYER", "LAYER1", "LAYER2", "LAYER3"];
         let mut layers: Vec<Layer> = Vec::new();
         for layer_key in layer_keys {
             if page_map.contains_key(layer_key) {
                 let layer_addr = page_map.get(layer_key).unwrap().parse::<u64>()?;
-                let data = parse_metadata_block(&mut file, layer_addr)?;
+                let data = parse_metadata_block(file, layer_addr)?;
                 layers.push(Layer {
                     key: layer_key.to_string(),
                     protocol: data.get("LAYERPROTOCOL").cloned().unwrap_or_default(),
@@ -138,12 +139,6 @@ fn parse_notebook(file_path: &str) -> Result<Notebook> {
         pages: pages,
     })
 }
-
-// Add these constants near the top of your file
-const A5X_WIDTH: usize = 1404;
-const A5X_HEIGHT: usize = 1872;
-
-// ... Your existing structs and parsing functions ...
 
 /// Decodes a byte stream compressed with the RATTA_RLE algorithm.
 fn decode_rle(compressed_data: &[u8]) -> Result<Vec<u8>> {
@@ -215,24 +210,27 @@ fn decode_rle(compressed_data: &[u8]) -> Result<Vec<u8>> {
     Ok(decompressed)
 }
 
-/// Maps a Supernote grayscale color code to an RGBA pixel.
+/// Maps a Supernote color codes to an RGBA pixel.
 fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
     match pixel_byte {
-        0x61 => Rgba([0, 0, 0, 255]),          // Black
-        0x63 => Rgba([0x9d, 0x9d, 0x9d, 255]), // Dark Gray
-        0x9d => Rgba([0x9d, 0x9d, 0x9d, 255]), // Dark Gray
-        0x9e => Rgba([0x9d, 0x9d, 0x9d, 255]), // Dark Gray
-        0x64 => Rgba([0xc9, 0xc9, 0xc9, 255]), // Gray
-        0xc9 => Rgba([0xc9, 0xc9, 0xc9, 255]), // Gray
-        0xca => Rgba([0xc9, 0xc9, 0xc9, 255]), // Gray
-        0x65 => Rgba([255, 255, 255, 255]),    // White
-        // 0x62 => Rgba([255, 255, 255, 255]),    // White
-        0x62 => Rgba([0, 0, 0, 0]), // Transparent (Alpha = 0)
+        // --- Core Colors ---
+        0x61 => Rgba([0, 0, 0, 255]),       // Black
+        0x65 => Rgba([255, 255, 255, 255]), // White
+        0x62 => Rgba([0, 0, 0, 0]),         // Transparent (used for background layer)
+
+        // --- Grays (and their aliases/compat codes) ---
+        // Dark Gray
+        0x63 | 0x9d | 0x9e => Rgba([0x9d, 0x9d, 0x9d, 255]),
+        // Gray
+        0x64 | 0xc9 | 0xca => Rgba([0xc9, 0xc9, 0xc9, 255]),
+
+        // --- Handle all other bytes as anti-aliasing pixels ---
         _ => {
-            // println!("Unknown pixel_byte: {:#04x}", pixel_byte);
-            Rgba([0, 0, 0, 255]) // black
-            // Rgba([0, 0, 0, 0]) // transparent
-        } // _ => Rgba([0, 0, 0, 0]), // Default: Magenta for unknown codes
+            // The byte value itself represents the grayscale intensity.
+            // This renders the smooth edges of handwritten strokes.
+            // this encoding is from the newer note format.
+            Rgba([pixel_byte, pixel_byte, pixel_byte, 255])
+        }
     }
 }
 
@@ -240,12 +238,13 @@ fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
 // and just use ? to access the ok value
 fn main() -> Result<()> {
     let file_path = "./data/sample.note";
+    let mut file = File::open(file_path)?;
     println!("Attempting to read signature from: {}", file_path);
 
-    let signature = get_signature(file_path)?;
+    let signature = get_signature(&mut file)?;
     println!("File Signature: {}", signature);
 
-    let notebook = parse_notebook(file_path)?;
+    let notebook = parse_notebook(&mut file)?;
     // println!("{:?}", notebook);
     // Let's try to decode the first RLE layer we find.
 
@@ -253,30 +252,22 @@ fn main() -> Result<()> {
     if let Some(first_page) = notebook.pages.get(0) {
         println!("\n--- Compositing Page 0 ---");
 
-        // 1. Create the base canvas for the page.
-        // This will be our final image. We start with a fully transparent background.
-        // let mut base_canvas = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
-
         let mut base_canvas = RgbaImage::from_pixel(
             A5X_WIDTH as u32,
             A5X_HEIGHT as u32,
             Rgba([255, 255, 255, 255]), // Solid White
         );
-        // 2. Iterate through each layer of the page to decode and overlay it.
+        // iterate through layers in page
         for (l, layer) in first_page.layers.iter().enumerate() {
             if layer.bitmap_address == 0 {
                 continue; // Skip empty/unused layers
             }
 
-            println!(
-                "Processing Layer {}: Protocol='{}', Address={}",
-                l, layer.protocol, layer.bitmap_address
-            );
+            // println!(
+            //     "Processing Layer {}: Protocol='{}', Address={}",
+            //     l, layer.protocol, layer.bitmap_address
+            // );
 
-            // Open the file to read this layer's data.
-            let mut file = File::open(file_path)?;
-
-            // --- DECODE THE LAYER ---
             let pixel_data = match layer.protocol.as_str() {
                 "RATTA_RLE" => {
                     // Read the compressed RLE data block
@@ -286,6 +277,7 @@ fn main() -> Result<()> {
                     let block_len = u32::from_le_bytes(len_bytes) as usize;
                     let mut compressed_data = vec![0; block_len];
                     file.read_exact(&mut compressed_data)?;
+                    // this is returned to the match arm
                     decode_rle(&compressed_data)?
                 }
                 "PNG" => {
@@ -302,7 +294,6 @@ fn main() -> Result<()> {
                     imageops::overlay(&mut base_canvas, &png_image, 0, 0);
                     continue;
                 }
-                // We can add more protocols like ZLIB here later
                 _ => {
                     println!("  -> Skipping unsupported protocol '{}'", layer.protocol);
                     continue;
@@ -317,10 +308,8 @@ fn main() -> Result<()> {
             }
 
             imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
-            println!("  -> Overlayed layer {} onto the canvas.", l);
         }
 
-        // // 3. Save the final composited image.
         let output_filename = "output_page_0_composite.png";
         base_canvas.save(output_filename)?;
         println!("\n✅ Page 0 composite image saved as '{}'", output_filename);
