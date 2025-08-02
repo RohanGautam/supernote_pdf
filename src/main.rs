@@ -296,7 +296,6 @@ fn main() -> Result<()> {
         // let pmg = ImageFormat::Png
         base_canvas.write_to(&mut buffer, ImageFormat::Png)?;
         page_images.push(buffer.into_inner());
-        break;
     }
 
     println!("{} pages", page_images.len());
@@ -326,8 +325,8 @@ fn main() -> Result<()> {
         ops.push(Op::UseXobject {
             id: image_id.clone(),
             transform: XObjectTransform {
-                scale_x: Some(1.0 / scale_x),
-                scale_y: Some(1.0 / scale_y),
+                scale_x: Some(scale_x),
+                scale_y: Some(scale_y),
                 ..Default::default()
             },
         });
