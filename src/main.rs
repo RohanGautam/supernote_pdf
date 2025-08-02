@@ -1,7 +1,10 @@
 use anyhow::{Ok, Result};
 use image::{EncodableLayout, ImageFormat, Rgba, RgbaImage, imageops};
 use itertools::Itertools;
-use printpdf::{Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Pt, RawImage, XObjectTransform};
+use printpdf::{
+    ImageOptimizationOptions, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Pt, RawImage,
+    XObjectTransform,
+};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
@@ -10,8 +13,8 @@ use vtracer::{ColorImage, convert};
 
 const A5X_WIDTH: usize = 1404;
 const A5X_HEIGHT: usize = 1872;
-const PDF_WIDTH: f32 = 147.0;
-const PDF_HEIGHT: f32 = 209.0;
+const PDF_WIDTH: f32 = 210.0;
+const PDF_HEIGHT: f32 = 297.0;
 const PDF_DPI: f32 = 300.0;
 
 #[derive(Debug)]
@@ -117,11 +120,23 @@ fn parse_notebook(file: &mut File) -> Result<Notebook> {
     let mut pages: Vec<Page> = Vec::new();
     for addr in page_addrs {
         let page_map = parse_metadata_block(file, addr)?;
-        let layer_keys = ["BGLAYER", "MAINLAYER", "LAYER1", "LAYER2", "LAYER3"];
+        let layer_order = page_map
+            .get("LAYERSEQ")
+            .map(|s| s.split(',').map(String::from).collect())
+            .unwrap_or_else(|| {
+                // Default order if LAYERSEQ is missing
+                vec![
+                    "BGLAYER".to_string(),
+                    "MAINLAYER".to_string(),
+                    "LAYER1".to_string(),
+                    "LAYER2".to_string(),
+                    "LAYER3".to_string(),
+                ]
+            });
         let mut layers: Vec<Layer> = Vec::new();
-        for layer_key in layer_keys {
-            if page_map.contains_key(layer_key) {
-                let layer_addr = page_map.get(layer_key).unwrap().parse::<u64>()?;
+        for layer_key in layer_order.iter() {
+            if page_map.contains_key(layer_key.as_str()) {
+                let layer_addr = page_map.get(layer_key.as_str()).unwrap().parse::<u64>()?;
                 let data = parse_metadata_block(file, layer_addr)?;
                 layers.push(Layer {
                     key: layer_key.to_string(),
@@ -259,8 +274,12 @@ fn main() -> Result<()> {
             A5X_WIDTH as u32,
             A5X_HEIGHT as u32,
             Rgba([255, 255, 255, 255]), // Solid White bg by default
+                                        // Rgba([0, 0, 0, 0]), // Solid White bg by default
         );
         for layer in page.layers.iter() {
+            // if layer.key == "BGLAYER" {
+            // println!("{}", layer.protocol);
+
             if layer.bitmap_address == 0 {
                 continue; // Skip empty/unused layers
             } else if layer.protocol.as_str() == "RATTA_RLE" {
@@ -279,6 +298,7 @@ fn main() -> Result<()> {
                     let y = (i / A5X_WIDTH) as u32;
                     layer_image.put_pixel(x, y, to_rgba(pixel_byte));
                 }
+                layer_image.save("outimg.png")?;
                 imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
             } else if layer.protocol.as_str() == "PNG" {
                 file.seek(SeekFrom::Start(layer.bitmap_address))?;
@@ -292,6 +312,7 @@ fn main() -> Result<()> {
                 imageops::overlay(&mut base_canvas, &png_image, 0, 0);
             }
         }
+
         let mut buffer = Cursor::new(Vec::new());
         // let pmg = ImageFormat::Png
         base_canvas.write_to(&mut buffer, ImageFormat::Png)?;
@@ -333,9 +354,20 @@ fn main() -> Result<()> {
         let page = PdfPage::new(Mm(PDF_WIDTH), Mm(PDF_HEIGHT), ops);
         pages_pdf.push(page);
     }
+    // let bytes = doc.with_pages(pages_pdf).save(
+    //     &PdfSaveOptions {
+    //         optimize: false,
+    //         image_optimization: Some(ImageOptimizationOptions {
+    //             auto_optimize: Some(false),
+    //             ..Default::default()
+    //         }),
+    //         ..Default::default()
+    //     },
+    //     &mut Vec::new(),
+    // ); // doc.add_image(page_images.get(0)?);
     let bytes = doc
         .with_pages(pages_pdf)
-        .save(&PdfSaveOptions::default(), &mut Vec::new()); // doc.add_image(page_images.get(0)?);
+        .save(&PdfSaveOptions::default(), &mut Vec::new());
     std::fs::write("./output.pdf", bytes).unwrap();
 
     Ok(())
