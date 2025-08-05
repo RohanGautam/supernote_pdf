@@ -316,6 +316,8 @@ fn main() -> Result<()> {
         let mut buffer = Cursor::new(Vec::new());
         // let pmg = ImageFormat::Png
         base_canvas.write_to(&mut buffer, ImageFormat::Png)?;
+        // images are fine in quality - just have to keep in mind pdf image compression
+        // base_canvas.save("out.png")?;
         page_images.push(buffer.into_inner());
     }
 
@@ -337,12 +339,6 @@ fn main() -> Result<()> {
         // Add the image to the document resources and get its ID
         let image_id = doc.add_image(&raw);
 
-        // Place the image with default transform (at 0,0)
-        // ops.push(Op::UseXobject {
-        //     id: image_id.clone(),
-        //     transform: XObjectTransform::default(),
-        // });
-
         ops.push(Op::UseXobject {
             id: image_id.clone(),
             transform: XObjectTransform {
@@ -354,20 +350,24 @@ fn main() -> Result<()> {
         let page = PdfPage::new(Mm(PDF_WIDTH), Mm(PDF_HEIGHT), ops);
         pages_pdf.push(page);
     }
-    // let bytes = doc.with_pages(pages_pdf).save(
-    //     &PdfSaveOptions {
-    //         optimize: false,
-    //         image_optimization: Some(ImageOptimizationOptions {
-    //             auto_optimize: Some(false),
-    //             ..Default::default()
-    //         }),
-    //         ..Default::default()
-    //     },
-    //     &mut Vec::new(),
-    // ); // doc.add_image(page_images.get(0)?);
-    let bytes = doc
-        .with_pages(pages_pdf)
-        .save(&PdfSaveOptions::default(), &mut Vec::new());
+
+    // let bytes = doc
+    //     .with_pages(pages_pdf)
+    //     .save(&PdfSaveOptions::default(), &mut Vec::new());
+    let bytes = doc.with_pages(pages_pdf).save(
+        &PdfSaveOptions {
+            optimize: false,
+            image_optimization: Some(ImageOptimizationOptions {
+                quality: Some(100.0),
+                max_image_size: Some("20MB".to_string()), // did the trick
+                auto_optimize: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        &mut Vec::new(),
+    ); // doc.add_image(page_images.get(0)?);
+
     std::fs::write("./output.pdf", bytes).unwrap();
 
     Ok(())
