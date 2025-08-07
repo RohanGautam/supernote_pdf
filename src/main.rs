@@ -9,7 +9,19 @@ use regex::Regex;
 use std::fs::File;
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use clap::Parser;
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Path to input .note file
+    #[arg(short, long)]
+    input: String,
+
+    /// Path to write the final converted pdf
+    #[arg(short, long)]
+    output: String,
+}
 const A5X_WIDTH: usize = 1404;
 const A5X_HEIGHT: usize = 1872;
 
@@ -263,11 +275,14 @@ fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
 }
 
 fn main() -> Result<()> {
-    let file_path = "./data/sample.note";
+    let args = Args::parse();
+    let input_path = args.input.as_str();
+    let output_path = args.output;
+    // let out
 
     // file handle dropped outside this scope
     let notebook = {
-        let mut file = File::open(file_path)?;
+        let mut file = File::open(input_path)?;
         parse_notebook(&mut file)?
     };
 
@@ -275,7 +290,7 @@ fn main() -> Result<()> {
         .pages
         .par_iter()
         .map(|page| {
-            let mut file = File::open(file_path)?;
+            let mut file = File::open(input_path)?;
 
             let mut base_canvas = RgbaImage::from_pixel(
                 A5X_WIDTH as u32,
@@ -376,7 +391,7 @@ fn main() -> Result<()> {
         .collect();
 
     // Write everything to a file sequentially 
-    let out_file = File::create("output.pdf")?;
+    let out_file = File::create(output_path)?;
     let mut writer = BufWriter::new(out_file);
     let mut byte_offset = 0u64;
     let mut xref_offsets = vec![0u64; total_pages * 3 + 2]; // Room for all objects
