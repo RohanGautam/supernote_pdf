@@ -6,6 +6,7 @@ use printpdf::{
     ImageOptimizationOptions, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, RawImage,
     XObjectTransform,
 };
+use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
@@ -259,110 +260,101 @@ fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
     }
 }
 
-// make main return result so you can work with functions returning result
-// and just use ? to access the ok value
 fn main() -> Result<()> {
     let file_path = "./data/sample.note";
-    let mut file = File::open(file_path)?;
 
-    // let signature = get_signature(&mut file)?;
-    // println!("File Signature: {}", signature);
+    // file handle dropped outside this scope
+    let notebook = {
+        let mut file = File::open(file_path)?;
+        parse_notebook(&mut file)?
+    };
 
-    let notebook = parse_notebook(&mut file)?;
-    // println!("{:?}", notebook);
+    let page_images: Vec<RawImage> = notebook
+        .pages
+        .par_iter()
+        .map(|page| {
+            let mut file = File::open(file_path)?;
 
-    // .iter() des not create a copy
-    // https://stackoverflow.com/questions/73601250/why-use-iter-in-a-for-loop-rust
-    let mut page_images = Vec::new();
-    for page in notebook.pages.iter() {
-        let mut base_canvas = RgbaImage::from_pixel(
-            A5X_WIDTH as u32,
-            A5X_HEIGHT as u32,
-            Rgba([255, 255, 255, 255]), // Solid White bg by default
-                                        // Rgba([0, 0, 0, 0]), // Solid White bg by default
-        );
-        for layer in page.layers.iter() {
-            // if layer.key == "BGLAYER" {
-            // println!("{}", layer.protocol);
+            let mut base_canvas = RgbaImage::from_pixel(
+                A5X_WIDTH as u32,
+                A5X_HEIGHT as u32,
+                Rgba([255, 255, 255, 255]),
+            );
 
-            if layer.bitmap_address == 0 {
-                continue; // Skip empty/unused layers
-            } else if layer.protocol.as_str() == "RATTA_RLE" {
-                // Read the compressed RLE data block
-                file.seek(SeekFrom::Start(layer.bitmap_address))?;
-                let mut len_bytes = [0u8; 4];
-                file.read_exact(&mut len_bytes)?;
-                let block_len = u32::from_le_bytes(len_bytes) as usize;
-                let mut compressed_data = vec![0; block_len];
-                file.read_exact(&mut compressed_data)?;
-                let pixel_data = decode_rle(&compressed_data)?;
-                // create new image for this layer and overlay
-                let mut layer_image = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
-                for (i, &pixel_byte) in pixel_data.iter().enumerate() {
-                    let x = (i % A5X_WIDTH) as u32;
-                    let y = (i / A5X_WIDTH) as u32;
-                    layer_image.put_pixel(x, y, to_rgba(pixel_byte));
+            for layer in page.layers.iter() {
+                if layer.bitmap_address == 0 {
+                    continue;
+                } else if layer.protocol.as_str() == "RATTA_RLE" {
+                    file.seek(SeekFrom::Start(layer.bitmap_address))?;
+                    let mut len_bytes = [0u8; 4];
+                    file.read_exact(&mut len_bytes)?;
+                    let block_len = u32::from_le_bytes(len_bytes) as usize;
+                    let mut compressed_data = vec![0; block_len];
+                    file.read_exact(&mut compressed_data)?;
+                    let pixel_data = decode_rle(&compressed_data)?;
+
+                    let mut layer_image = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
+                    for (i, &pixel_byte) in pixel_data.iter().enumerate() {
+                        let x = (i % A5X_WIDTH) as u32;
+                        let y = (i / A5X_WIDTH) as u32;
+                        layer_image.put_pixel(x, y, to_rgba(pixel_byte));
+                    }
+                    imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
+                } else if layer.protocol.as_str() == "PNG" {
+                    file.seek(SeekFrom::Start(layer.bitmap_address))?;
+                    let mut len_bytes = [0u8; 4];
+                    file.read_exact(&mut len_bytes)?;
+                    let block_len = u32::from_le_bytes(len_bytes) as usize;
+
+                    let mut png_bytes = vec![0; block_len];
+                    file.read_exact(&mut png_bytes)?;
+                    let png_image = image::load_from_memory(&png_bytes)?.to_rgba8();
+                    imageops::overlay(&mut base_canvas, &png_image, 0, 0);
                 }
-                imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
-            } else if layer.protocol.as_str() == "PNG" {
-                file.seek(SeekFrom::Start(layer.bitmap_address))?;
-                let mut len_bytes = [0u8; 4];
-                file.read_exact(&mut len_bytes)?;
-                let block_len = u32::from_le_bytes(len_bytes) as usize;
-
-                let mut png_bytes = vec![0; block_len];
-                file.read_exact(&mut png_bytes)?;
-                let png_image = image::load_from_memory(&png_bytes)?.to_rgba8();
-                imageops::overlay(&mut base_canvas, &png_image, 0, 0);
             }
-        }
 
-        let mut buffer = Cursor::new(Vec::new());
-        // let pmg = ImageFormat::Png
-        base_canvas.write_to(&mut buffer, ImageFormat::Png)?;
-        // images are fine in quality - just have to keep in mind pdf image compression
-        // base_canvas.save("out.png")?;
-        page_images.push(buffer.into_inner());
-    }
+            let mut buffer = Cursor::new(Vec::new());
+            base_canvas.write_to(&mut buffer, ImageFormat::Png)?;
 
-    println!("{} pages", page_images.len());
+            let img_data = buffer.into_inner();
+            // for printpdf
+            let raw_img = RawImage::decode_from_bytes(&img_data, &mut Vec::new()).unwrap();
+            Ok(raw_img)
+        })
+        .collect::<Result<Vec<RawImage>>>()?;
+
+    println!("{} pages processed in parallel.", page_images.len());
 
     // write to a pdf
     let mut doc = PdfDocument::new("Supernote Backup");
-    let mut pages_pdf = Vec::new();
 
     let img_width_mm = ((A5X_WIDTH as f32) / PDF_DPI) * 25.4;
     let img_height_mm = ((A5X_HEIGHT as f32) / PDF_DPI) * 25.4;
     let scale_x = PDF_WIDTH / img_width_mm;
     let scale_y = PDF_HEIGHT / img_height_mm;
 
-    for img in page_images.iter() {
-        // let bytes = img.as_bytes();
-        let raw = RawImage::decode_from_bytes(img, &mut Vec::new()).unwrap();
-        let mut ops = Vec::new();
-        // Add the image to the document resources and get its ID
-        let image_id = doc.add_image(&raw);
+    let pages_pdf = page_images
+        .iter()
+        .map(|img| {
+            let mut ops = Vec::new();
+            let image_id = doc.add_image(&img);
+            ops.push(Op::UseXobject {
+                id: image_id.clone(),
+                transform: XObjectTransform {
+                    scale_x: Some(scale_x),
+                    scale_y: Some(scale_y),
+                    ..Default::default()
+                },
+            });
+            PdfPage::new(Mm(PDF_WIDTH), Mm(PDF_HEIGHT), ops)
+        })
+        .collect::<Vec<PdfPage>>();
 
-        ops.push(Op::UseXobject {
-            id: image_id.clone(),
-            transform: XObjectTransform {
-                scale_x: Some(scale_x),
-                scale_y: Some(scale_y),
-                ..Default::default()
-            },
-        });
-        let page = PdfPage::new(Mm(PDF_WIDTH), Mm(PDF_HEIGHT), ops);
-        pages_pdf.push(page);
-    }
-
-    // let bytes = doc
-    //     .with_pages(pages_pdf)
-    //     .save(&PdfSaveOptions::default(), &mut Vec::new());
+    // time taking part
     let bytes = doc.with_pages(pages_pdf).save(
         &PdfSaveOptions {
             optimize: false,
             image_optimization: Some(ImageOptimizationOptions {
-                quality: Some(100.0),
                 max_image_size: Some("20MB".to_string()), // did the trick
                 auto_optimize: Some(false),
                 ..Default::default()
@@ -370,9 +362,8 @@ fn main() -> Result<()> {
             ..Default::default()
         },
         &mut Vec::new(),
-    ); // doc.add_image(page_images.get(0)?);
+    );
 
-    // std::fs::write("./output.pdf", bytes).unwrap();
     std::fs::write("./output.pdf", bytes)?;
 
     Ok(())

@@ -7,6 +7,8 @@ version = "0.1.0"
 anyhow = "1.0.98"
 image = "0.25.6"
 itertools = "0.14.0"
+lazy_static = "1.5.0"
 printpdf = {version = "0.8.2", features = ["png"]}
+rayon = "1.10.0"
 regex = "1.11.1"
 vtracer = "0.6.3"
