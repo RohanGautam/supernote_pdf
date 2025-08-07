@@ -1,21 +1,26 @@
 use anyhow::{Ok, Result};
-use image::{EncodableLayout, ImageFormat, Rgba, RgbaImage, imageops};
+use image::{ImageFormat, Rgba, RgbaImage, imageops};
 use itertools::Itertools;
+use lazy_static::lazy_static;
 use printpdf::{
-    ImageOptimizationOptions, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Pt, RawImage,
+    ImageOptimizationOptions, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, RawImage,
     XObjectTransform,
 };
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write};
-use vtracer::{ColorImage, convert};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 const A5X_WIDTH: usize = 1404;
 const A5X_HEIGHT: usize = 1872;
 const PDF_WIDTH: f32 = 210.0;
 const PDF_HEIGHT: f32 = 297.0;
 const PDF_DPI: f32 = 300.0;
+
+// precompile regex
+lazy_static! {
+    static ref METADATA_RE: Regex = Regex::new(r"<(?P<key>[^:]+?):(?P<value>.*?)>").unwrap();
+}
 
 #[derive(Debug)]
 pub struct Notebook {
@@ -67,7 +72,6 @@ fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String,
         let empty: HashMap<String, String> = HashMap::new();
         return Ok(empty);
     }
-    let re = Regex::new(r"<(?P<key>[^:]+?):(?P<value>.*?)>")?;
 
     file.seek(SeekFrom::Start(address))?;
 
@@ -82,7 +86,7 @@ fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String,
     let content = String::from_utf8(content_bytes)?;
 
     // Use the regex to find all key-value pairs and collect them into a map.
-    let map: HashMap<String, String> = re
+    let map: HashMap<String, String> = METADATA_RE
         .captures_iter(&content)
         .map(|cap| {
             let key = cap.name("key").unwrap().as_str().to_string();
@@ -135,8 +139,9 @@ fn parse_notebook(file: &mut File) -> Result<Notebook> {
             });
         let mut layers: Vec<Layer> = Vec::new();
         for layer_key in layer_order.iter() {
-            if page_map.contains_key(layer_key.as_str()) {
-                let layer_addr = page_map.get(layer_key.as_str()).unwrap().parse::<u64>()?;
+            // if page_map.contains_key(layer_key.as_str()) {
+            if let Some(addr_str) = page_map.get(layer_key.as_str()) {
+                let layer_addr = addr_str.parse::<u64>()?;
                 let data = parse_metadata_block(file, layer_addr)?;
                 layers.push(Layer {
                     key: layer_key.to_string(),
@@ -298,7 +303,6 @@ fn main() -> Result<()> {
                     let y = (i / A5X_WIDTH) as u32;
                     layer_image.put_pixel(x, y, to_rgba(pixel_byte));
                 }
-                layer_image.save("outimg.png")?;
                 imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
             } else if layer.protocol.as_str() == "PNG" {
                 file.seek(SeekFrom::Start(layer.bitmap_address))?;
@@ -368,7 +372,8 @@ fn main() -> Result<()> {
         &mut Vec::new(),
     ); // doc.add_image(page_images.get(0)?);
 
-    std::fs::write("./output.pdf", bytes).unwrap();
+    // std::fs::write("./output.pdf", bytes).unwrap();
+    std::fs::write("./output.pdf", bytes)?;
 
     Ok(())
 }
