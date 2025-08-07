@@ -1,26 +1,30 @@
-use anyhow::{Ok, Result};
+use anyhow::{Ok, Result, bail};
+use clap::Parser;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use image::{ Rgba, RgbaImage, imageops};
+use image::{Rgba, RgbaImage, imageops};
+use indicatif::ProgressBar;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use rayon::prelude::*;
 use regex::Regex;
-use std::fs::File;
 use std::collections::HashMap;
+use std::fs;
+use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use clap::Parser;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {
+struct Cli {
     /// Path to input .note file
     #[arg(short, long)]
-    input: String,
+    input: PathBuf,
 
     /// Path to write the final converted pdf
     #[arg(short, long)]
-    output: String,
+    output: PathBuf,
 }
 const A5X_WIDTH: usize = 1404;
 const A5X_HEIGHT: usize = 1872;
@@ -161,17 +165,11 @@ fn parse_notebook(file: &mut File) -> Result<Notebook> {
                 layers.push(Layer {
                     key: layer_key.to_string(),
                     protocol: data.get("LAYERPROTOCOL").cloned().unwrap_or_default(),
-                    bitmap_address: data
-                        .get("LAYERBITMAP")
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0),
+                    bitmap_address: data.get("LAYERBITMAP").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
                 });
             }
         }
-        pages.push(Page {
-            addr: addr,
-            layers: layers,
-        });
+        pages.push(Page { addr: addr, layers: layers });
     }
 
     Ok(Notebook {
@@ -274,12 +272,7 @@ fn to_rgba(pixel_byte: u8) -> Rgba<u8> {
     }
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let input_path = args.input.as_str();
-    let output_path = args.output;
-    // let out
-
+fn convert_note_to_pdf(input_path: &Path, output_path: &Path) -> Result<()> {
     // file handle dropped outside this scope
     let notebook = {
         let mut file = File::open(input_path)?;
@@ -292,11 +285,7 @@ fn main() -> Result<()> {
         .map(|page| {
             let mut file = File::open(input_path)?;
 
-            let mut base_canvas = RgbaImage::from_pixel(
-                A5X_WIDTH as u32,
-                A5X_HEIGHT as u32,
-                Rgba([255, 255, 255, 255]),
-            );
+            let mut base_canvas = RgbaImage::from_pixel(A5X_WIDTH as u32, A5X_HEIGHT as u32, Rgba([255, 255, 255, 255]));
 
             for layer in page.layers.iter() {
                 if layer.bitmap_address == 0 {
@@ -333,11 +322,10 @@ fn main() -> Result<()> {
             Ok(base_canvas)
         })
         .collect::<Result<Vec<_>>>()?;
-
     let total_pages = page_images.len();
     let page_chunks: Vec<PdfPageChunk> = page_images
         .into_par_iter()
-        .enumerate() 
+        .enumerate()
         .map(|(i, canvas)| {
             // Each page will use 3 objects: Page, Contents, Image
             let page_obj_id = (i * 3) + 3;
@@ -366,7 +354,6 @@ fn main() -> Result<()> {
                 contents.len(),
                 contents
             ).into_bytes();
-            
             let image_header = format!(
                 "{} 0 obj\n<< /Type /XObject\n   /Subtype /Image\n   /Width {}\n   /Height {}\n   /ColorSpace /DeviceRGB\n   /BitsPerComponent 8\n   /Filter /FlateDecode\n   /Length {} >>\nstream\n",
                 image_obj_id,
@@ -390,7 +377,7 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    // Write everything to a file sequentially 
+    // Write everything to a file sequentially
     let out_file = File::create(output_path)?;
     let mut writer = BufWriter::new(out_file);
     let mut byte_offset = 0u64;
@@ -409,21 +396,15 @@ fn main() -> Result<()> {
 
     // Object 2: The root Pages object
     xref_offsets[1] = byte_offset;
-    let page_refs: String = (0..total_pages)
-        .map(|i| format!("{} 0 R", (i * 3) + 3))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let pages_root = format!(
-        "2 0 obj\n<< /Type /Pages /Kids [ {} ] /Count {} >>\nendobj\n",
-        page_refs, total_pages
-    ).into_bytes();
+    let page_refs: String = (0..total_pages).map(|i| format!("{} 0 R", (i * 3) + 3)).collect::<Vec<_>>().join(" ");
+    let pages_root = format!("2 0 obj\n<< /Type /Pages /Kids [ {} ] /Count {} >>\nendobj\n", page_refs, total_pages).into_bytes();
     writer.write_all(&pages_root)?;
     byte_offset += pages_root.len() as u64;
 
     // --- Write all the page chunks : cannot be parallelised ---
     for (i, chunk) in page_chunks.iter().enumerate() {
         let page_obj_id_idx = (i * 3) + 2;
-        
+
         xref_offsets[page_obj_id_idx] = byte_offset;
         writer.write_all(&chunk.page_object)?;
         byte_offset += chunk.page_object.len() as u64;
@@ -431,7 +412,7 @@ fn main() -> Result<()> {
         xref_offsets[page_obj_id_idx + 1] = byte_offset;
         writer.write_all(&chunk.contents_object)?;
         byte_offset += chunk.contents_object.len() as u64;
-        
+
         xref_offsets[page_obj_id_idx + 2] = byte_offset;
         writer.write_all(&chunk.image_object)?;
         byte_offset += chunk.image_object.len() as u64;
@@ -455,5 +436,61 @@ fn main() -> Result<()> {
     writer.flush()?;
 
     println!("Successfully created PDF.");
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    if !cli.input.is_dir() {
+        bail!("Input path '{}' is not a valid directory.", cli.input.display());
+    }
+    if cli.output.exists() {
+        bail!(
+            "Output directory '{}' already exists. Please remove it or choose a different directory to prevent data loss.",
+            cli.output.display()
+        );
+    }
+
+    let jobs: Vec<(PathBuf, PathBuf)> = WalkDir::new(&cli.input)
+        .into_iter()
+        .filter_map(Result::ok) // Ignore errors during walk (e.g., permission denied)
+        .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |s| s == "note"))
+        .map(|entry| {
+            let input_path = entry.into_path();
+            // Create the corresponding output path by mirroring the directory structure
+            let relative_path = input_path.strip_prefix(&cli.input).unwrap();
+            let mut output_path = cli.output.join(relative_path);
+            output_path.set_extension("pdf");
+            (input_path, output_path)
+        })
+        .collect();
+
+    if jobs.is_empty() {
+        println!("No .note files found. Exiting.");
+        return Ok(());
+    }
+
+    let pb = ProgressBar::new(jobs.len() as u64);
+    jobs.into_par_iter().for_each(|(input_path, output_path)| {
+        pb.set_message(format!("Converting {}...", input_path.file_name().unwrap().to_str().unwrap()));
+
+        // Ensure the parent directory for the output file exists.
+        if let Some(parent) = output_path.parent() {
+            // This is thread-safe and fine to call multiple times.
+            fs::create_dir_all(parent).expect("Failed to create output subdirectory");
+        }
+
+        // Run the conversion for this single file.
+        if let Err(e) = convert_note_to_pdf(&input_path, &output_path) {
+            // For batch jobs, it's often better to report errors than to crash.
+            pb.println(format!("Failed to convert '{}': {}", input_path.display(), e));
+        }
+
+        pb.inc(1); // Increment progress
+    });
+
+    pb.finish_with_message("All files converted successfully!");
+
     Ok(())
 }
