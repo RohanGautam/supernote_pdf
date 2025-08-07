@@ -13,6 +13,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -435,7 +436,6 @@ fn convert_note_to_pdf(input_path: &Path, output_path: &Path) -> Result<()> {
 
     writer.flush()?;
 
-    println!("Successfully created PDF.");
     Ok(())
 }
 
@@ -471,7 +471,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let pb = ProgressBar::new(jobs.len() as u64);
+    let start = Instant::now();
+    let num_jobs = jobs.len();
+    let pb = ProgressBar::new(num_jobs as u64);
     jobs.into_par_iter().for_each(|(input_path, output_path)| {
         pb.set_message(format!("Converting {}...", input_path.file_name().unwrap().to_str().unwrap()));
 
@@ -491,6 +493,7 @@ fn main() -> Result<()> {
     });
 
     pb.finish_with_message("All files converted successfully!");
+    println!("Converted {} files in {:?}", num_jobs, start.elapsed());
 
     Ok(())
 }

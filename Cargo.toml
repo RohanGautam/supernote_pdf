@@ -8,7 +8,9 @@ anyhow = "1.0.98"
 clap = { version = "4.5.43", features = ["derive"] }
 flate2 = "1.1.2"
 image = "0.25.6"
+indicatif = { version = "0.18.0", features = ["rayon"] }
 itertools = "0.14.0"
 lazy_static = "1.5.0"
 rayon = "1.10.0"
 regex = "1.11.1"
+walkdir = "2.5.0"
