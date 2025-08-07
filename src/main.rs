@@ -1,22 +1,17 @@
 use anyhow::{Ok, Result};
-use image::{ImageFormat, Rgba, RgbaImage, imageops};
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
+use image::{ Rgba, RgbaImage, imageops};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use printpdf::{
-    ImageOptimizationOptions, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, RawImage,
-    XObjectTransform,
-};
 use rayon::prelude::*;
 use regex::Regex;
-use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::collections::HashMap;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 const A5X_WIDTH: usize = 1404;
 const A5X_HEIGHT: usize = 1872;
-const PDF_WIDTH: f32 = 210.0;
-const PDF_HEIGHT: f32 = 297.0;
-const PDF_DPI: f32 = 300.0;
 
 // precompile regex
 lazy_static! {
@@ -40,6 +35,13 @@ pub struct Layer {
     pub key: String,
     pub protocol: String,
     pub bitmap_address: u64,
+}
+
+#[derive(Debug)]
+struct PdfPageChunk {
+    page_object: Vec<u8>,
+    contents_object: Vec<u8>,
+    image_object: Vec<u8>,
 }
 
 fn get_signature(file: &mut File) -> Result<String> {
@@ -269,7 +271,7 @@ fn main() -> Result<()> {
         parse_notebook(&mut file)?
     };
 
-    let page_images: Vec<RawImage> = notebook
+    let page_images = notebook
         .pages
         .par_iter()
         .map(|page| {
@@ -313,58 +315,130 @@ fn main() -> Result<()> {
                 }
             }
 
-            let mut buffer = Cursor::new(Vec::new());
-            base_canvas.write_to(&mut buffer, ImageFormat::Png)?;
-
-            let img_data = buffer.into_inner();
-            // for printpdf
-            let raw_img = RawImage::decode_from_bytes(&img_data, &mut Vec::new()).unwrap();
-            Ok(raw_img)
+            Ok(base_canvas)
         })
-        .collect::<Result<Vec<RawImage>>>()?;
+        .collect::<Result<Vec<_>>>()?;
 
-    println!("{} pages processed in parallel.", page_images.len());
+    let total_pages = page_images.len();
+    let page_chunks: Vec<PdfPageChunk> = page_images
+        .into_par_iter()
+        .enumerate() 
+        .map(|(i, canvas)| {
+            // Each page will use 3 objects: Page, Contents, Image
+            let page_obj_id = (i * 3) + 3;
+            let contents_obj_id = (i * 3) + 4;
+            let image_obj_id = (i * 3) + 5;
 
-    // write to a pdf
-    let mut doc = PdfDocument::new("Supernote Backup");
+            let dynamic_image = image::DynamicImage::ImageRgba8(canvas);
 
-    let img_width_mm = ((A5X_WIDTH as f32) / PDF_DPI) * 25.4;
-    let img_height_mm = ((A5X_HEIGHT as f32) / PDF_DPI) * 25.4;
-    let scale_x = PDF_WIDTH / img_width_mm;
-    let scale_y = PDF_HEIGHT / img_height_mm;
+            let raw_pixels = dynamic_image.to_rgb8().into_raw();
 
-    let pages_pdf = page_images
-        .iter()
-        .map(|img| {
-            let mut ops = Vec::new();
-            let image_id = doc.add_image(&img);
-            ops.push(Op::UseXobject {
-                id: image_id.clone(),
-                transform: XObjectTransform {
-                    scale_x: Some(scale_x),
-                    scale_y: Some(scale_y),
-                    ..Default::default()
-                },
-            });
-            PdfPage::new(Mm(PDF_WIDTH), Mm(PDF_HEIGHT), ops)
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&raw_pixels).unwrap();
+            let compressed_pixels = encoder.finish().unwrap();
+
+            let page_object = format!(
+                "{} 0 obj\n<< /Type /Page\n   /Parent 2 0 R\n   /MediaBox [0 0 595 842]\n   /Contents {} 0 R\n   /Resources << /XObject << /Im1 {} 0 R >> >>\n>>\nendobj\n",
+                page_obj_id,
+                contents_obj_id,
+                image_obj_id
+            ).into_bytes();
+
+            let contents = "q\n595 0 0 842 0 0 cm\n/Im1 Do\nQ\n";
+            let contents_object = format!(
+                "{} 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+                contents_obj_id,
+                contents.len(),
+                contents
+            ).into_bytes();
+            
+            let image_header = format!(
+                "{} 0 obj\n<< /Type /XObject\n   /Subtype /Image\n   /Width {}\n   /Height {}\n   /ColorSpace /DeviceRGB\n   /BitsPerComponent 8\n   /Filter /FlateDecode\n   /Length {} >>\nstream\n",
+                image_obj_id,
+                A5X_WIDTH,
+                A5X_HEIGHT,
+                compressed_pixels.len()
+            ).into_bytes();
+
+            // Combine the header, the compressed data, and the footer for the image object
+            let final_image_object = [
+                image_header,
+                compressed_pixels,
+                b"\nendstream\nendobj\n".to_vec()
+            ].concat();
+
+            PdfPageChunk {
+                page_object,
+                contents_object,
+                image_object: final_image_object,
+            }
         })
-        .collect::<Vec<PdfPage>>();
+        .collect();
 
-    // time taking part
-    let bytes = doc.with_pages(pages_pdf).save(
-        &PdfSaveOptions {
-            optimize: false,
-            image_optimization: Some(ImageOptimizationOptions {
-                max_image_size: Some("20MB".to_string()), // did the trick
-                auto_optimize: Some(false),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        &mut Vec::new(),
-    );
+    // Write everything to a file sequentially 
+    let out_file = File::create("output.pdf")?;
+    let mut writer = BufWriter::new(out_file);
+    let mut byte_offset = 0u64;
+    let mut xref_offsets = vec![0u64; total_pages * 3 + 2]; // Room for all objects
 
-    std::fs::write("./output.pdf", bytes)?;
+    // Write PDF Header
+    let header = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n"; // Header + binary comment
+    writer.write_all(header)?;
+    byte_offset += header.len() as u64;
 
+    // Object 1: Catalog
+    xref_offsets[0] = byte_offset;
+    let catalog = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+    writer.write_all(catalog)?;
+    byte_offset += catalog.len() as u64;
+
+    // Object 2: The root Pages object
+    xref_offsets[1] = byte_offset;
+    let page_refs: String = (0..total_pages)
+        .map(|i| format!("{} 0 R", (i * 3) + 3))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let pages_root = format!(
+        "2 0 obj\n<< /Type /Pages /Kids [ {} ] /Count {} >>\nendobj\n",
+        page_refs, total_pages
+    ).into_bytes();
+    writer.write_all(&pages_root)?;
+    byte_offset += pages_root.len() as u64;
+
+    // --- Write all the page chunks : cannot be parallelised ---
+    for (i, chunk) in page_chunks.iter().enumerate() {
+        let page_obj_id_idx = (i * 3) + 2;
+        
+        xref_offsets[page_obj_id_idx] = byte_offset;
+        writer.write_all(&chunk.page_object)?;
+        byte_offset += chunk.page_object.len() as u64;
+
+        xref_offsets[page_obj_id_idx + 1] = byte_offset;
+        writer.write_all(&chunk.contents_object)?;
+        byte_offset += chunk.contents_object.len() as u64;
+        
+        xref_offsets[page_obj_id_idx + 2] = byte_offset;
+        writer.write_all(&chunk.image_object)?;
+        byte_offset += chunk.image_object.len() as u64;
+    }
+
+    // --- Write Cross-Reference Table and Trailer ---
+    let xref_start_offset = byte_offset;
+    writer.write_all(b"xref\n")?;
+    writer.write_all(format!("0 {}\n", xref_offsets.len() + 1).as_bytes())?;
+    writer.write_all(b"0000000000 65535 f \n")?; // XRef entry for object 0
+    for offset in &xref_offsets {
+        writer.write_all(format!("{:010} 00000 n \n", offset).as_bytes())?;
+    }
+
+    writer.write_all(b"trailer\n")?;
+    writer.write_all(format!("<< /Size {} /Root 1 0 R >>\n", xref_offsets.len() + 1).as_bytes())?;
+    writer.write_all(b"startxref\n")?;
+    writer.write_all(format!("{}\n", xref_start_offset).as_bytes())?;
+    writer.write_all(b"%%EOF\n")?;
+
+    writer.flush()?;
+
+    println!("Successfully created PDF.");
     Ok(())
 }
