@@ -1,6 +1,6 @@
 # supernote-pdf
 
-[![Crates.io](https://img.shields.io/crates/v/supernote-pdf.svg)](https://crates.io/crates/supernote-pdf)
+[![Crates.io](https://img.shields.io/crates/v/supernote_pdf)](https://crates.io/crates/supernote-pdf)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A blazing-fast CLI tool for converting Supernote `.note` files to PDF, optimized for archival and backup.
