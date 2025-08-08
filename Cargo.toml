@@ -1,14 +1,20 @@
 [package]
+categories = ["command-line-utilities", "filesystem"]
+description = "CLI to convert .note files (and directories of them) into pdfs for archival and backup"
 edition = "2024"
+keywords = ["supernote", "pdf", "backup"]
+license = "MIT"
 name = "supernote_pdf"
+readme = "README.md"
+repository = "https://github.com/RohanGautam/supernote_pdf"
 version = "0.1.0"
 
 [dependencies]
 anyhow = "1.0.98"
-clap = { version = "4.5.43", features = ["derive"] }
+clap = {version = "4.5.43", features = ["derive"]}
 flate2 = "1.1.2"
 image = "0.25.6"
-indicatif = { version = "0.18.0", features = ["rayon"] }
+indicatif = {version = "0.18.0", features = ["rayon"]}
 itertools = "0.14.0"
 lazy_static = "1.5.0"
 rayon = "1.10.0"
