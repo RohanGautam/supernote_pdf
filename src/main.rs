@@ -9,8 +9,7 @@ use lazy_static::lazy_static;
 use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashMap;
-use std::fs;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -19,11 +18,11 @@ use walkdir::WalkDir;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// Path to input .note file
+    /// Input file (.note) or directory containing .note files
     #[arg(short, long)]
     input: PathBuf,
 
-    /// Path to write the final converted pdf
+    /// Output file (.pdf) or directory
     #[arg(short, long)]
     output: PathBuf,
 }
@@ -439,28 +438,69 @@ fn convert_note_to_pdf(input_path: &Path, output_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    if !cli.input.is_dir() {
-        bail!("Input path '{}' is not a valid directory.", cli.input.display());
+fn process_single_file(input_file: &Path, output_file: &Path) -> Result<()> {
+    if input_file.extension().map_or(true, |s| s != "note") {
+        bail!("Input file '{}' must have a .note extension.", input_file.display());
     }
-    if cli.output.exists() {
+    if output_file.is_dir() {
         bail!(
-            "Output directory '{}' already exists. Please remove it or choose a different directory to prevent data loss.",
-            cli.output.display()
+            "Input is a file, but output '{}' is a directory. Please specify an output file path.",
+            output_file.display()
+        );
+    }
+    if output_file.extension().map_or(true, |s| s != "pdf") {
+        bail!("Output file '{}' must have a .pdf extension.", output_file.display());
+    }
+    if output_file.exists() {
+        bail!(
+            "Output file '{}' already exists. Please remove it or choose a different name.",
+            output_file.display()
         );
     }
 
-    let jobs: Vec<(PathBuf, PathBuf)> = WalkDir::new(&cli.input)
+    println!("Converting single file...");
+    let start = Instant::now();
+    let pb = ProgressBar::new_spinner();
+    pb.set_message(format!("Converting {}...", input_file.display()));
+
+    convert_note_to_pdf(input_file, output_file)?;
+
+    pb.finish_with_message("Conversion complete!");
+    println!(
+        "Successfully converted '{}' to '{}' in {:?}",
+        input_file.display(),
+        output_file.display(),
+        start.elapsed()
+    );
+
+    Ok(())
+}
+
+fn process_directory(input_dir: &Path, output_dir: &Path) -> Result<()> {
+    if output_dir.is_file() {
+        bail!(
+            "Input is a directory, but output '{}' is a file. Please specify an output directory.",
+            output_dir.display()
+        );
+    }
+
+    if output_dir.exists() {
+        bail!(
+            "Output directory '{}' already exists. Please remove it or choose a different directory to prevent data loss.",
+            output_dir.display()
+        );
+    }
+
+    println!("Scanning for .note files in '{}'...", input_dir.display());
+    let jobs: Vec<(PathBuf, PathBuf)> = WalkDir::new(input_dir)
         .into_iter()
-        .filter_map(Result::ok) // Ignore errors during walk (e.g., permission denied)
+        .filter_map(Result::ok) // Ignore errors during walk
         .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |s| s == "note"))
         .map(|entry| {
             let input_path = entry.into_path();
             // Create the corresponding output path by mirroring the directory structure
-            let relative_path = input_path.strip_prefix(&cli.input).unwrap();
-            let mut output_path = cli.output.join(relative_path);
+            let relative_path = input_path.strip_prefix(input_dir).expect("Path from WalkDir should have a known prefix");
+            let mut output_path = output_dir.join(relative_path);
             output_path.set_extension("pdf");
             (input_path, output_path)
         })
@@ -471,29 +511,44 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let start = Instant::now();
     let num_jobs = jobs.len();
+    println!("Found {} files to convert. Starting conversion...", num_jobs);
+    let start = Instant::now();
+
     let pb = ProgressBar::new(num_jobs as u64);
     jobs.into_par_iter().for_each(|(input_path, output_path)| {
-        pb.set_message(format!("Converting {}...", input_path.file_name().unwrap().to_str().unwrap()));
-
-        // Ensure the parent directory for the output file exists.
+        let file_name = input_path.file_name().unwrap_or_default().to_string_lossy();
+        pb.set_message(format!("Converting {}...", file_name));
         if let Some(parent) = output_path.parent() {
-            // This is thread-safe and fine to call multiple times.
             fs::create_dir_all(parent).expect("Failed to create output subdirectory");
         }
 
-        // Run the conversion for this single file.
         if let Err(e) = convert_note_to_pdf(&input_path, &output_path) {
-            // For batch jobs, it's often better to report errors than to crash.
             pb.println(format!("Failed to convert '{}': {}", input_path.display(), e));
         }
-
-        pb.inc(1); // Increment progress
+        pb.inc(1);
     });
 
-    pb.finish_with_message("All files converted successfully!");
+    pb.finish_with_message("All files converted!");
     println!("Converted {} files in {:?}", num_jobs, start.elapsed());
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    if !cli.input.exists() {
+        bail!("Input path '{}' does not exist.", cli.input.display());
+    }
+
+    if cli.input.is_dir() {
+        process_directory(&cli.input, &cli.output)?;
+    } else if cli.input.is_file() {
+        process_single_file(&cli.input, &cli.output)?;
+    } else {
+        bail!("Input path '{}' is not a regular file or directory.", cli.input.display());
+    }
 
     Ok(())
 }
