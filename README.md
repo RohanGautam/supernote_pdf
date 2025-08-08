@@ -5,7 +5,15 @@
 
 A blazing-fast CLI tool for converting Supernote `.note` files to PDF, optimized for archival and backup.
 
-This tool is designed for one thing: converting Supernote `.note` files to PDF at maximum speed. It leverages parallel processing and custom PDF generation logic to handle large collections of notes in seconds, not minutes.
+<p align="center">
+    <img src="assets/image.png" alt="demo" style="width:100%;">
+</p>
+
+_supernote_pdf converting a 800Mb folder of Notes into pdfs in 14s._
+
+---
+
+This tool is designed for one thing: converting Supernote `.note` files to PDF at maximum speed. It leverages parallel processing and custom PDF generation logic to handle large collections of notes.
 
 ## ✨ Features
 
@@ -41,17 +49,19 @@ Several key design decisions were made to optimize for the primary goal of fast,
 
 ### From Crates.io (Recommended)
 
-Ensure you have the Rust toolchain installed. Then, you can install `supernote-pdf` directly from Crates.io using `cargo`:
+Ensure you have the [Rust toolchain installed](https://www.rust-lang.org/tools/install). Then, you can install `supernote_pdf` CLI directly from Crates.io using `cargo`:
 
 ```bash
-cargo install supernote-pdf
+cargo install supernote_pdf
 ```
+
+and `supernote_pdf` will be available as a tool in your shell.
 
 ### From Source
 
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/your-username/supernote-pdf.git
+    git clone https://github.com/your-username/supernote_pdf.git
     cd supernote-pdf
     ```
 2.  Build and run the project:
@@ -64,7 +74,7 @@ cargo install supernote-pdf
 The CLI is simple, requiring an input path and an output path.
 
 ```bash
-supernote-pdf -i <input-path> -o <output-path>
+supernote_pdf -i <input-path> -o <output-path>
 ```
 
 ### Example 1: Convert a Single File
@@ -72,7 +82,7 @@ supernote-pdf -i <input-path> -o <output-path>
 To convert a single `.note` file to a `.pdf` file:
 
 ```bash
-supernote-pdf -i "My Notes/Meeting Agenda.note" -o "Archive/Meeting Agenda.pdf"
+supernote_pdf -i "My Notes/Meeting Agenda.note" -o "Archive/Meeting Agenda.pdf"
 ```
 
 ### Example 2: Convert an Entire Directory
@@ -80,7 +90,7 @@ supernote-pdf -i "My Notes/Meeting Agenda.note" -o "Archive/Meeting Agenda.pdf"
 To convert your entire `Note` folder (copied from your Supernote) into a new `Note_PDFs` directory:
 
 ```bash
-supernote-pdf -i path/to/your/Note_folder -o path/to/your/Note_PDFs
+supernote_pdf -i path/to/your/Note_folder -o path/to/your/Note_PDFs
 ```
 
 The tool will scan for all `.note` files in the input directory, recreate the folder structure in the output directory, and convert every file.
@@ -89,7 +99,7 @@ The tool will scan for all `.note` files in the input directory, recreate the fo
 
 ## 📊 Benchmarks
 
-`supernote-pdf` is significantly faster than available tools, making it ideal for large and frequent backups.
+`supernote_pdf` is significantly faster than available tools, making it ideal for large and frequent backups.
 
 ### Single File Conversion
 
@@ -98,14 +108,14 @@ Test converting a 30-page, ~50MB `.note` file:
 | Tool                            | Time      | Performance     |
 | ------------------------------- | --------- | --------------- |
 | `supernote-tool`                | `18.6 s`  | Baseline        |
-| **`supernote-pdf` (this tool)** | `~600 ms` | **~30x Faster** |
+| **`supernote_pdf` (this tool)** | `~600 ms` | **~30x Faster** |
 
 ### Full Directory Conversion
 
 Test converting a local copy of my Supernote's `Note` folder:
 
 - **Input:** `~800 MB` directory of `.note` files
-- **Time Taken:** `~13 s`
+- **Time Taken:** `~14 s`
 - **Output:** `~84 MB` directory of `.pdf` files
 
 ---
