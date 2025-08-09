@@ -1,4 +1,4 @@
-use anyhow::{Ok, Result, bail};
+use anyhow::{Result, bail};
 use clap::Parser;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -28,6 +28,8 @@ struct Cli {
 }
 const A5X_WIDTH: usize = 1404;
 const A5X_HEIGHT: usize = 1872;
+const A5X2_WIDTH: usize = 1920;
+const A5X2_HEIGHT: usize = 2560;
 
 // precompile regex
 lazy_static! {
@@ -38,6 +40,8 @@ lazy_static! {
 pub struct Notebook {
     pub signature: String,
     pub pages: Vec<Page>,
+    pub width: usize,
+    pub height: usize,
 }
 
 #[derive(Debug)]
@@ -117,6 +121,23 @@ fn parse_metadata_block(file: &mut File, address: u64) -> Result<HashMap<String,
     Ok(map)
 }
 
+/// Detects the device type and returns the appropriate width and height dimensions
+fn detect_device_dimensions(file: &mut File, footer_map: &HashMap<String, String>) -> Result<(usize, usize)> {
+    if let Some(header_addr_str) = footer_map.get("FILE_FEATURE") {
+        if let Ok(header_addr) = header_addr_str.parse::<u64>() {
+            let header_map = parse_metadata_block(file, header_addr)?;
+            if let Some(equipment) = header_map.get("APPLY_EQUIPMENT") {
+                if equipment == "N5" {
+                    return Ok((A5X2_WIDTH, A5X2_HEIGHT));
+                } else {
+                    return Ok((A5X_WIDTH, A5X_HEIGHT));
+                }
+            }
+        }
+    }
+    Ok((A5X_WIDTH, A5X_HEIGHT))
+}
+
 fn parse_notebook(file: &mut File) -> Result<Notebook> {
     let file_signature = get_signature(file)?;
 
@@ -126,7 +147,9 @@ fn parse_notebook(file: &mut File) -> Result<Notebook> {
     file.read_exact(&mut addr_bytes)?;
     let footer_addr = u32::from_le_bytes(addr_bytes) as u64; // Convert the little-endian bytes to a u32, then cast to u64
     let footer_map = parse_metadata_block(file, footer_addr)?;
-    // println!("{:?}", footer_map);
+
+    // Detect device dimensions by parsing header
+    let (width, height) = detect_device_dimensions(file, &footer_map)?;
 
     // get page addresses from the hashmap, sorted
     let page_addrs = footer_map
@@ -175,13 +198,15 @@ fn parse_notebook(file: &mut File) -> Result<Notebook> {
     Ok(Notebook {
         signature: file_signature,
         pages: pages,
+        width,
+        height,
     })
 }
 
 /// Decodes a byte stream compressed with the RATTA_RLE algorithm.
-fn decode_rle(compressed_data: &[u8]) -> Result<Vec<u8>> {
-    // A5X screen dimensions
-    let expected_len = A5X_WIDTH * A5X_HEIGHT;
+fn decode_rle(compressed_data: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    // Screen dimensions
+    let expected_len = width * height;
     let mut decompressed = Vec::with_capacity(expected_len);
 
     let mut i = 0; // Our position in the compressed_data slice
@@ -279,13 +304,16 @@ fn convert_note_to_pdf(input_path: &Path, output_path: &Path) -> Result<()> {
         parse_notebook(&mut file)?
     };
 
+    let width = notebook.width;
+    let height = notebook.height;
+
     let page_images = notebook
         .pages
         .par_iter()
         .map(|page| {
             let mut file = File::open(input_path)?;
 
-            let mut base_canvas = RgbaImage::from_pixel(A5X_WIDTH as u32, A5X_HEIGHT as u32, Rgba([255, 255, 255, 255]));
+            let mut base_canvas = RgbaImage::from_pixel(width as u32, height as u32, Rgba([255, 255, 255, 255]));
 
             for layer in page.layers.iter() {
                 if layer.bitmap_address == 0 {
@@ -297,12 +325,12 @@ fn convert_note_to_pdf(input_path: &Path, output_path: &Path) -> Result<()> {
                     let block_len = u32::from_le_bytes(len_bytes) as usize;
                     let mut compressed_data = vec![0; block_len];
                     file.read_exact(&mut compressed_data)?;
-                    let pixel_data = decode_rle(&compressed_data)?;
+                    let pixel_data = decode_rle(&compressed_data, width, height)?;
 
-                    let mut layer_image = RgbaImage::new(A5X_WIDTH as u32, A5X_HEIGHT as u32);
+                    let mut layer_image = RgbaImage::new(width as u32, height as u32);
                     for (i, &pixel_byte) in pixel_data.iter().enumerate() {
-                        let x = (i % A5X_WIDTH) as u32;
-                        let y = (i / A5X_WIDTH) as u32;
+                        let x = (i % width) as u32;
+                        let y = (i / width) as u32;
                         layer_image.put_pixel(x, y, to_rgba(pixel_byte));
                     }
                     imageops::overlay(&mut base_canvas, &layer_image, 0, 0);
@@ -357,8 +385,8 @@ fn convert_note_to_pdf(input_path: &Path, output_path: &Path) -> Result<()> {
             let image_header = format!(
                 "{} 0 obj\n<< /Type /XObject\n   /Subtype /Image\n   /Width {}\n   /Height {}\n   /ColorSpace /DeviceRGB\n   /BitsPerComponent 8\n   /Filter /FlateDecode\n   /Length {} >>\nstream\n",
                 image_obj_id,
-                A5X_WIDTH,
-                A5X_HEIGHT,
+                width,
+                height,
                 compressed_pixels.len()
             ).into_bytes();
 
