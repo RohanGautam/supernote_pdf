@@ -39,7 +39,7 @@ notes/                  notes_pdf/
 
 Several key design decisions were made to optimize for the primary goal of fast, reliable backups:
 
-- **A5X Support:** The tool is tested and optimized for the Supernote A5X with the latest firmware (that's what I have and can test!). Support for other devices is on the [Roadmap](#-roadmap).
+- **Device Support:** The tool works with the files generated from the A5X and A5X2(Manta). A5X2 supoprt was added by @kkettinger . If you have other devices open an issue with a test `.note` file and I can work on adding support for that too!
 - **Archival Focus:** This conversion is for backup and viewing. It does not (yet) support interactive PDF features like hyperlinks or tags from the original note.
 - **Raster over Vector:** The converter embeds page images (raster graphics) directly into the PDF. While vector graphics are infinitely scalable, this approach was chosen because:
   - It keeps file sizes significantly smaller for notes with a lot of writing.
