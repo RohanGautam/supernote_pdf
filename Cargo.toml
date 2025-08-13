@@ -7,7 +7,7 @@ license = "MIT"
 name = "supernote_pdf"
 readme = "README.md"
 repository = "https://github.com/RohanGautam/supernote_pdf"
-version = "0.1.0"
+version = "0.1.1"
 
 [dependencies]
 anyhow = "1.0.98"
